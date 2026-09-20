@@ -56,10 +56,9 @@ import time
 import numpy as np
 from datetime import date
 from pathlib import Path
-from PIL import Image               # WRW 12 Mar 2023 - Added 'from PIL'
-from PIL import ImageDraw
-from PIL import ImageFont
-from PIL import ImageOps
+from deep10 import Image, ImageDraw, ImageFont, ImageOps   # 10-bit shim
+from deep10 import MAXVAL, SRCMAX, scale8, r10, lab, snap_legal
+from deep10 import writer as deep_writer
 
 # -----------------------------------------------------------------------------------
 #   A couple of global variables. Remainder below are constants.
@@ -236,15 +235,11 @@ class Writer():
         if self.verbose:
             print( ofile )
 
-        try:
-            if self.output_type == "jpg":
-                img.save( opath, quality=80 )
-            else:
-                img.save( opath )
-
-        except KeyError:
-            print("Output file type not recognized:", self.output_type )
+        if self.output_type not in ("tif", "png"):
+            print( "10-bit output supports only 'tif' and 'png', not:", self.output_type )
             sys.exit( 1 )
+        deep_writer.write( opath, img.to_array(),
+                           f"{pattern}, 10-bit codes 0-{MAXVAL} stored full-scale in 16 bits" )
 
 # -----------------------------------------------------------------------------------
 #   Yes, I know a hack. See comment about "lazy" above.
@@ -504,13 +499,13 @@ def mk_wipe_full( size, name, color ):
     color = np.array( color )
 
     for x in range( int(size[0]/2 )):        # Black to saturated in 1/2 width, WRW 12 Mar 2023 - added int()
-        gray = int(255. * x/(size[0]/2 - 1))
-        d.line( ((x,0), (x,size[1]-1)), fill=tuple(color*gray))
+        gray = int(MAXVAL * x/(size[0]/2 - 1))
+        d.line( ((x,0), (x,size[1]-1)), fill=r10(color*gray))
 
     for x in range( int( size[0]/2), size[0] ):  # Saturated to white in 1/2 width, WRW 12 Mar 2023 - added int()
-        gray = int(255. * (x-size[0]/2)/(size[0]/2 - 1))
-        fill = color * 255 + (color ^ 1) * gray
-        d.line( ((x,0), (x,size[1]-1)), fill=tuple(fill) )
+        gray = int(MAXVAL * (x-size[0]/2)/(size[0]/2 - 1))
+        fill = color * MAXVAL + (color ^ 1) * gray
+        d.line( ((x,0), (x,size[1]-1)), fill=r10(fill) )
 
     save_img( img, "color-wipe-full-" + name )
 
@@ -523,8 +518,8 @@ def mk_wipe_half( size, name, color ):
     color = np.array( color )
 
     for x in range( size[0]):        # Black to saturated
-        gray = int(255. * x/size[0])
-        d.line( ((x,0), (x,size[1]-1)), fill=tuple( color * gray ) )
+        gray = int(MAXVAL * x/size[0])
+        d.line( ((x,0), (x,size[1]-1)), fill=r10( color * gray ) )
 
     save_img( img, "color-wipe-half-" + name )
 
@@ -570,7 +565,7 @@ def mk_wedge( size, name, color, log ):
             d.rectangle( ((xoff,yoff), (xoff+xsize-1, yoff+ysize-1)), fill=tuple( igray * color ))
 
             if text_flag:
-                text = "%d" % igray
+                text = "%d" % lab(igray)
                 font = ImageFont.load( "pilfonts/helvR08.pil" )
                 fsize = my_textsize( d,  text, font=font )
 
@@ -609,8 +604,8 @@ def mk_wipes_all_colors_half( size ):
     for __, color in colors_6g:
         color = np.array( color )
         for xoff in range( size[0] ):  # 0 to size[0]-1
-            gray = int(255. * xoff/(size[0] - 1))
-            d.line( ((xoff,yoff), (xoff, yoff+ysize-1)), fill=( tuple(color * gray) ))
+            gray = int(MAXVAL * xoff/(size[0] - 1))
+            d.line( ((xoff,yoff), (xoff, yoff+ysize-1)), fill=( r10(color * gray) ))
         yoff += ysize + gap
 
     save_img( img, "check-color-wipe-half" )
@@ -631,13 +626,13 @@ def mk_wipes_all_colors_full( size ):
         gray = 0
 
         for x in range( int(size[0]/2) ):        # Black to saturated in 1/2 width. WRW 12 Mar 2023 - added int()
-            gray = int(255. * x/(size[0]/2 - 1))
-            d.line( ( (x,yoff), (x,yoff+ysize-1) ), fill=tuple(color*gray) )
+            gray = int(MAXVAL * x/(size[0]/2 - 1))
+            d.line( ( (x,yoff), (x,yoff+ysize-1) ), fill=r10(color*gray) )
 
         for x in range( int( size[0]/2), size[0] ):  # Saturated to white in 1/2 width, WRW 12 Mar 2023 - added int()
-            gray = int(255. * (x-size[0]/2)/(size[0]/2 - 1))
-            fill = color * 255 + (color ^ 1) * gray
-            d.line( ((x,yoff), (x,yoff+ysize-1)), fill=tuple(fill) )
+            gray = int(MAXVAL * (x-size[0]/2)/(size[0]/2 - 1))
+            fill = color * MAXVAL + (color ^ 1) * gray
+            d.line( ((x,yoff), (x,yoff+ysize-1)), fill=r10(fill) )
 
         yoff += ysize + gap
 
@@ -671,12 +666,14 @@ def mk_color_bars( size, vert, bar_cnt ):
     for i in range( bar_cnt ):
         off = i * bsize
         h = i * 1./bar_cnt
-        color = [int( x * 255 ) for x in colorsys.hsv_to_rgb(h, s, v)]
+        _mx = MAXVAL if bar_cnt > 12 else 255
+        color = [int( x * _mx ) for x in colorsys.hsv_to_rgb(h, s, v)]
+        color = r10(color) if bar_cnt > 12 else color
 
         if vert:
-            d.rectangle( ((off, 0), (off+bsize-1, size[1]-1)), fill=tuple(color) )
+            d.rectangle( ((off, 0), (off+bsize-1, size[1]-1)), fill=color )
         else:
-            d.rectangle( ((0, off), (size[0]-1, off+bsize-1)), fill=tuple(color) )
+            d.rectangle( ((0, off), (size[0]-1, off+bsize-1)), fill=color )
 
     name = "vert" if vert else "hori"
     bar_name = "cont" if bar_cnt > 12 else ("%02d" % bar_cnt)   # Little hack
@@ -694,6 +691,7 @@ def mk_targets_all( size ):
 # -----------------------------------------------------------------------------------
 
 def mk_targets( size, name, lower, upper ):
+    snap_legal( True )
     dia = min( size[0]/2, size[1] ) * .8
     gap = (size[0] - 2.*dia)/3
 
@@ -713,6 +711,7 @@ def mk_targets( size, name, lower, upper ):
     mk_target( d, (x2, y), 2*dia/3, upper[1] )
     mk_target( d, (x2, y), dia/3, upper[2] )
 
+    snap_legal( False )
     save_img( img, "check-clipping-target-" + name )
 
 # -----------------------------------------------------------------------------------
@@ -723,7 +722,7 @@ def mk_target( d, center, dia, gray ):
     d.ellipse( (center[0] - dia/2, center[1] - dia/2, center[0] + dia/2, center[1]+dia/2), fill=(gray,)*3 )
 
     if text_flag:
-        text = "%d" % gray
+        text = "%d" % lab(gray)
         font = ImageFont.load( "pilfonts/helvR10.pil" )
         fsize = my_textsize( d,  text, font=font )
 
@@ -757,6 +756,7 @@ def mk_clippings( size ):
 #       Footroom: 1-15, 236-254
 
 def mk_clipping( size, fname, bg, start, increment, color ):
+    snap_legal( True )
     img = Image.new( "RGB", size, (bg * color[0], bg * color[1], bg * color[2]) )
     d = ImageDraw.Draw( img )
 
@@ -782,7 +782,7 @@ def mk_clipping( size, fname, bg, start, increment, color ):
             d.rectangle( ((xoff,yoff), (xoff+xsize, yoff+ysize)), fill=tuple( gray * color ))
 
             if text_flag:
-                text = "%d" % gray
+                text = "%d" % lab(gray)
                 textb = "studio swing"
 
                 if gray < 128:
@@ -818,6 +818,7 @@ def mk_clipping( size, fname, bg, start, increment, color ):
 
             gray += increment
 
+    snap_legal( False )
     save_img( img, fname )
 
 # -----------------------------------------------------------------------------------
@@ -831,8 +832,8 @@ def mk_random_rgb( size ):
         for yoff in range( 0, size[1], pxsize ):
             for xoff in range( 0, size[0], pxsize ):
 
-                color = [random.randint( 0, 255 ) for __ in range(3)]
-                d.rectangle( ((xoff,yoff), (xoff+pxsize-1, yoff+pxsize-1)), fill=tuple(color))
+                color = [random.randint( 0, MAXVAL ) for __ in range(3)]
+                d.rectangle( ((xoff,yoff), (xoff+pxsize-1, yoff+pxsize-1)), fill=r10(color))
 
         save_img( img, "color-random-%02d" % pxsize )
 
@@ -846,8 +847,8 @@ def mk_random_gray( size ):
         d = ImageDraw.Draw( img )
         for yoff in range( 0, size[1], pxsize ):
             for xoff in range( 0, size[0], pxsize ):
-                gray = random.randint( 0, 255 )
-                d.rectangle( ((xoff,yoff), (xoff+pxsize-1, yoff+pxsize-1)), fill=(gray,)*3 )
+                gray = random.randint( 0, MAXVAL )
+                d.rectangle( ((xoff,yoff), (xoff+pxsize-1, yoff+pxsize-1)), fill=r10((gray,)*3) )
 
         save_img( img, "color-random-gray-%02d" % pxsize )
 
@@ -855,7 +856,7 @@ def mk_random_gray( size ):
 #   Arg mask is r, g, b
 
 def mk_colors_rgb( size ):
-    for fixed_val in ( 0, 127, 255 ):
+    for fixed_val in ( 0, scale8(127), MAXVAL ):
         mk_color_rgb( size, fixed_val, (1,0,0), (0,1,0), (0,0,1), "red",  "green", "blue" )
         mk_color_rgb( size, fixed_val, (0,1,0), (0,0,1), (1,0,0), "green", "blue", "red" )
         mk_color_rgb( size, fixed_val, (0,0,1), (1,0,0), (0,1,0), "blue", "red", "green" )
@@ -899,8 +900,8 @@ def mk_color_rgb( size, fixed_val, fixed, color1, color2, fixed_name, name1, nam
     color2 = np.array( color2 )
     fixed  = np.array( fixed )
 
-    x_vals = np.linspace( 0, 255, size[0] )   # shape (W,)
-    y_vals = np.linspace( 0, 255, size[1] )   # shape (H,)
+    x_vals = np.linspace( 0, MAXVAL, size[0] )   # shape (W,)
+    y_vals = np.linspace( 0, MAXVAL, size[1] )   # shape (H,)
 
     # Each contributes to (H, W, 3) via broadcasting
     fixed_contrib = fixed * fixed_val                          # (3,)
@@ -908,10 +909,10 @@ def mk_color_rgb( size, fixed_val, fixed, color1, color2, fixed_name, name1, nam
     y_contrib     = np.outer( y_vals, color2 )                # (H, 3)
 
     arr = fixed_contrib + x_contrib[np.newaxis, :, :] + y_contrib[:, np.newaxis, :]
-    arr = np.clip( arr, 0, 255 ).astype( np.uint8 )
+    arr = np.clip( arr, 0, MAXVAL ).astype( np.uint16 )
 
     img = Image.fromarray( arr, 'RGB' )
-    save_img( img, "wipe-rgb-fix-%s-%03d-var-%s-%s" % ( fixed_name, fixed_val, name1, name2 ) )
+    save_img( img, "wipe-rgb-fix-%s-%03d-var-%s-%s" % ( fixed_name, int( round( fixed_val * SRCMAX / MAXVAL ) ), name1, name2 ) )
 
 # -----------------------------------------------------------------------------------
 #   WRW 24-May-2026 - from Claude.
@@ -927,7 +928,7 @@ def _hsv_to_rgb_array( H, S, V ):
     r  = np.choose( i, [V, q, p, p, t, V] )
     g  = np.choose( i, [t, V, V, q, p, p] )
     b  = np.choose( i, [p, p, t, V, V, q] )
-    return ( np.stack( [r, g, b], axis=-1 ) * 255 ).astype( np.uint8 )
+    return ( np.stack( [r, g, b], axis=-1 ) * MAXVAL ).astype( np.uint16 )
 
 # -----------------------------------------------------------------------------------
 #   WRW 24-May-2026 - from Claude.
@@ -945,7 +946,7 @@ def _hls_to_rgb_array( H, L, S ):
     r  = _v( m1, m2, H + 1/3 )
     g  = _v( m1, m2, H )
     b  = _v( m1, m2, H - 1/3 )
-    return ( np.stack( [r, g, b], axis=-1 ) * 255 ).astype( np.uint8 )
+    return ( np.stack( [r, g, b], axis=-1 ) * MAXVAL ).astype( np.uint16 )
 
 # -----------------------------------------------------------------------------------
 #   Arg mask is h, s, v
@@ -1286,20 +1287,20 @@ def mk_color_step_wipes_one( size, name, color ):
 
     y0 = ypos_forward_wipe
     for x in range( xsize ):
-        gray = int(255. * x/(xsize-1))  # -1 to get to full 255
-        d.line( ((x, y0), (x, y0 + ysize -1)), fill=tuple(gray*color) )
+        gray = int(MAXVAL * x/(xsize-1))  # -1 to get to full scale
+        d.line( ((x, y0), (x, y0 + ysize -1)), fill=r10(gray*color) )
 
     # ------------------------------------------------------------------
     y0 = ypos_reverse_wipe
     for x in range( xsize ):
-        gray = int(255. * (xsize - x)/(xsize-1))
-        d.line( ((x, y0), (x,y0 + ysize -1)), fill=tuple(gray*color) )
+        gray = int(MAXVAL * (xsize - x)/(xsize-1))
+        d.line( ((x, y0), (x,y0 + ysize -1)), fill=r10(gray*color) )
 
     # ------------------------------------------------------------------
 
     wedges = 16
     wsize = 1. * xsize / wedges
-    gray_step = 255./(wedges-1)     # -1 to get to full 255
+    gray_step = MAXVAL/(wedges-1)     # -1 to get to full scale
 
     # ------------------------------------------------------------------
 
@@ -1322,10 +1323,10 @@ def mk_color_step_wipes_one( size, name, color ):
 
 def mk_color_step( d, c1, c2, gray, color ):
     gray = int( round( gray ) )     # round() to reach full 255
-    d.rectangle( ((c1[0],c1[1]), (c2[0], c2[1])), fill=tuple( gray*color))
+    d.rectangle( ((c1[0],c1[1]), (c2[0], c2[1])), fill=r10( gray*color))
 
     if text_flag:
-        text = "%d" % gray
+        text = "%d" % int(gray)
         font = ImageFont.load( "pilfonts/helvR08.pil" )
         fsize = my_textsize( d,  text, font=font )
 
@@ -1333,7 +1334,7 @@ def mk_color_step( d, c1, c2, gray, color ):
         xtext = c1[0] + xsize/2 - fsize[0]/2
         ytext = c2[1] - fsize[1] - 4
 
-        if luma( gray*color ) > 128:
+        if luma( gray*color ) > scale8(128):
             d.text( (xtext, ytext), text, fill="#000000", font=font )
         else:
             d.text( (xtext, ytext), text, fill="#ffffff", font=font )
@@ -1581,13 +1582,13 @@ def mk_color_triangle( size ):
                 #   Note: Tried adding new to existing pixel value but got many overflows.
                 #     New pixel values were equal/almost equal to existing value.
 
-                d.point( ( ptx, pty ), fill=tuple(color) )
+                d.point( ( ptx, pty ), fill=r10(color) )
 
     # ------------------------------------------------------------------
 
-    do_fan_points( (xr, yr), (xg, yg), (xb, yb), (255, 0, 0), (0, 255, 0), (0, 0, 255) )
-    do_fan_points( (xg, yg), (xb, yb), (xr, yr), (0, 255, 0), (0, 0, 255), (255, 0, 0) )
-    do_fan_points( (xb, yb), (xr, yr), (xg, yg), (0, 0, 255), (255, 0, 0), (0, 255, 0) )
+    do_fan_points( (xr, yr), (xg, yg), (xb, yb), (MAXVAL, 0, 0), (0, MAXVAL, 0), (0, 0, MAXVAL) )
+    do_fan_points( (xg, yg), (xb, yb), (xr, yr), (0, MAXVAL, 0), (0, 0, MAXVAL), (MAXVAL, 0, 0) )
+    do_fan_points( (xb, yb), (xr, yr), (xg, yg), (0, 0, MAXVAL), (MAXVAL, 0, 0), (0, MAXVAL, 0) )
 
     # ------------------------------------------------------------------
 
@@ -1663,10 +1664,10 @@ def mk_color_triangle_solid( size ):
 
                 rgb_flag = 1
                 if rgb_flag:
-                    r = int( (1 - (dr*2.)/( lrg + lbr ) ) * 255 )
-                    g = int( (1 - (dg*2.)/( lrg + lgb ) ) * 255 )
-                    b = int( (1 - (db*2.)/( lgb + lbr ) ) * 255 )
-                    d.point( (x, y ), fill=(r, g, b) )
+                    r = int( (1 - (dr*2.)/( lrg + lbr ) ) * MAXVAL )
+                    g = int( (1 - (dg*2.)/( lrg + lgb ) ) * MAXVAL )
+                    b = int( (1 - (db*2.)/( lgb + lbr ) ) * MAXVAL )
+                    d.point( (x, y ), fill=r10((r, g, b)) )
 
                 # --------------- /// testing ------------------------
                 else:   # Not very interesting.
@@ -1677,7 +1678,7 @@ def mk_color_triangle_solid( size ):
                     s = (1 - (dg*2.)/( lrg + lgb ) )
                     v = (1 - (db*2.)/( lgb + lbr ) )
                     (r, g, b) = colorsys.hsv_to_rgb(h, s, v)
-                    d.point( (x, y ), fill=(int(r*255), int(g*255), int(b*255)) )
+                    d.point( (x, y ), fill=r10((int(r*MAXVAL), int(g*MAXVAL), int(b*MAXVAL))) )
 
                 # --------------- /// testing ------------------------
 
@@ -1933,26 +1934,26 @@ def mk_composite( size ):
 
     for i in range( xcnt ):
         h = i * 1./xcnt
-        color = [int( x * 255 ) for x in colorsys.hsv_to_rgb(h, s, v)]
+        color = [int( x * MAXVAL ) for x in colorsys.hsv_to_rgb(h, s, v)]
         xpos = bgap + i * ( cell[0] + gap )
-        d.rectangle( (( xpos, ypos ), (xpos + cell[0]-1, ypos + cell[1]-1)), tuple(color) )
+        d.rectangle( (( xpos, ypos ), (xpos + cell[0]-1, ypos + cell[1]-1)), r10(color) )
 
         if text_flag:
-            do_text_label( d, color, xpos, ypos, cell )
+            do_text_label( d, r10(color), xpos, ypos, cell )
 
     # ----------------------------------------------------------------------------------
     #   Gray boxes
 
     ypos = bgap + (cell[1] + gap) * p_gray_boxes
-    gray_step = 255./(xcnt-1)
+    gray_step = MAXVAL/(xcnt-1)
 
     for x in range( xcnt ):
         xpos = bgap + x * (cell[0] + gap )
         igray = int( x * gray_step )
-        d.rectangle( (( xpos, ypos ), (xpos + cell[0]-1, ypos + cell[1]-1)), ( igray,)*3  )
+        d.rectangle( (( xpos, ypos ), (xpos + cell[0]-1, ypos + cell[1]-1)), r10(( igray,)*3)  )
 
         if text_flag:
-            do_text_label( d, (igray,)*3, xpos, ypos, cell )
+            do_text_label( d, r10((igray,)*3), xpos, ypos, cell )
 
     # ----------------------------------------------------------------------------------
     #   Gray Wipe
@@ -1960,12 +1961,12 @@ def mk_composite( size ):
     ypos = bgap + (cell[1] + gap) * p_gray_wipe
 
     steps = (cell[0] * xcnt + gap * ( xcnt - 1))
-    gray_step = 255./steps
+    gray_step = MAXVAL/steps
 
     for x in range( int( steps )):
         xpos = x + bgap
         igray = int( gray_step * x )
-        d.line( ((xpos,ypos), (xpos, ypos+cell[1]-1)), fill=(igray,)*3 )
+        d.line( ((xpos,ypos), (xpos, ypos+cell[1]-1)), fill=r10((igray,)*3) )
 
     # ----------------------------------------------------------------------------------
     #   Color wipes
@@ -1973,7 +1974,7 @@ def mk_composite( size ):
     ypos = bgap + (cell[1] + gap) * p_color_wipe
 
     steps = (cell[0] * xcnt + gap * (xcnt - 1))
-    gray_step = 255./steps
+    gray_step = MAXVAL/steps
     ystep = cell[1]/3
 
     for x in range( int( steps ) ):
@@ -1983,7 +1984,7 @@ def mk_composite( size ):
         for (y, color) in enumerate( ((1,0,0), (0,1,0), (0,0,1))):
             color = np.array( color )
             yoff = y * ystep
-            d.line( ((xpos,ypos+yoff), (xpos, ypos + yoff + ystep-1 )), fill=tuple(igray*color) )
+            d.line( ((xpos,ypos+yoff), (xpos, ypos + yoff + ystep-1 )), fill=r10(igray*color) )
 
     # ----------------------------------------------------------------------------------
     #   Patterns. Exactly xcnt.
@@ -1992,7 +1993,7 @@ def mk_composite( size ):
     xpos = bgap
 
     for pat in composite_pats:
-        ti = get_image_from_pattern( cell, pat, (255,)*3 )
+        ti = get_image_from_pattern( cell, pat, r10((MAXVAL,)*3) )
         img.paste( ti, (int(xpos), int(ypos)) )
         xpos += cell[0] + gap
 
@@ -2006,12 +2007,12 @@ def mk_composite( size ):
 
     for (x, gamma) in enumerate( gammas ):
 
-        val = (.5 ** (1./gamma)) * 255.
+        val = (.5 ** (1./gamma)) * MAXVAL
         gray = int( val )      
 
-        background_ti = get_image_from_pattern( (cell[0]-1, cell[1]-1), pat_hlines_2, (255,)*3 )
+        background_ti = get_image_from_pattern( (cell[0]-1, cell[1]-1), pat_hlines_2, r10((MAXVAL,)*3) )
         img.paste( background_ti, (int(xpos), int(ypos)) )
-        d.rectangle( (int(xpos + cell[0]/4), int(ypos + cell[1]/4), (int(xpos + cell[0]*3/4 -1), int(ypos + cell[1]*3/4-1)) ), fill=(gray, gray, gray))
+        d.rectangle( (int(xpos + cell[0]/4), int(ypos + cell[1]/4), (int(xpos + cell[0]*3/4 -1), int(ypos + cell[1]*3/4-1)) ), fill=r10((gray, gray, gray)))
 
         # ----------------------------
         if text_flag:
@@ -2022,7 +2023,7 @@ def mk_composite( size ):
             xtext = xpos + cell[0]/2  - fsize[0]/2
             ytext = ypos + cell[1]*3/4 - fsize[1] - 4
 
-            if gray > 128:
+            if gray > scale8(128):
                 d.text( (xtext, ytext), text, fill="#000000", font=font )
             else:
                 d.text( (xtext, ytext), text, fill="#ffffff", font=font )
@@ -2065,7 +2066,7 @@ def mk_patterns_with_background( size ):
         img.paste( ti, (int(xpos + patoffx), int(ypos + patoffy )) )
 
         if text_flag:
-            text = "%d" %  gray
+            text = "%d" % lab(gray)
             font = ImageFont.load( "pilfonts/helvR10.pil" )
             fsize = my_textsize( d,  text, font=font )
             xtext = xpos + gray_cell[0]/2 - fsize[0]/2
@@ -2246,12 +2247,12 @@ def do_text_label( d, color, xpos, ypos, cell ):
 
     (r, g, b) = color
 
-    if luma3( r, g, b ) > 128:
+    if luma3( lab(r), lab(g), lab(b) ) > scale8(128):
         fill="#000000"
     else:
         fill="#ffffff"
 
-    text_rgb = "%d  %d  %d" %  (r, g, b)
+    text_rgb = "%d  %d  %d" %  (lab(r), lab(g), lab(b))
     fsize = my_textsize( d,  text_rgb, font=font )
     if fsize[0] <= cell[0]:
         xtext = xpos + cell[0]/2 - fsize[0]/2
@@ -2259,14 +2260,14 @@ def do_text_label( d, color, xpos, ypos, cell ):
         d.text( (xtext, ytext), text_rgb, fill=fill, font=font )
 
 
-    text_hsv = "%.3f  %.3f  %.3f" % colorsys.rgb_to_hsv(r/255., g/255., b/255.)
+    text_hsv = "%.3f  %.3f  %.3f" % colorsys.rgb_to_hsv(lab(r)/MAXVAL, lab(g)/MAXVAL, lab(b)/MAXVAL)
     fsize = my_textsize( d,  text_hsv, font=font )
     if fsize[0] <= cell[0]:
         xtext = xpos + cell[0]/2 - fsize[0]/2
         ytext = ypos + 4
         d.text( (xtext, ytext), text_hsv, fill=fill, font=font )
 
-    text_hsl = "%.3f  %.3f  %.3f" % colorsys.rgb_to_hls(r/255., g/255., b/255.)
+    text_hsl = "%.3f  %.3f  %.3f" % colorsys.rgb_to_hls(lab(r)/MAXVAL, lab(g)/MAXVAL, lab(b)/MAXVAL)
     fsize = my_textsize( d,  text_hsl, font=font )
     if fsize[0] <= cell[0]:
         xtext = xpos + cell[0]/2 - fsize[0]/2
